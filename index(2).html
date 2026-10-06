@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loop</title>
+<style>
+  :root { --bg:#0e1116; --fg:#e8ecf1; --muted:#8b95a3; --line:#2a313c; --accent:#5ab0ff; }
+  html, body { margin:0; height:100%; background:#000; overflow:hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--fg); }
+
+  /* Prompt screen */
+  #prompt { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:var(--bg); padding:24px; box-sizing:border-box; }
+  #prompt .box { width:100%; max-width:560px; }
+  #prompt h1 { font-size:1.5rem; font-weight:600; margin:0 0 6px; }
+  #prompt p { margin:0 0 20px; color:var(--muted); font-size:.95rem; line-height:1.5; }
+  #row { display:flex; gap:8px; }
+  #link { flex:1; min-width:0; padding:12px 14px; font-size:1rem; color:var(--fg);
+    background:#161b22; border:1px solid var(--line); border-radius:8px; }
+  #link:focus-visible, #go:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  #go { padding:12px 18px; font-size:1rem; font-weight:600; color:#06121f;
+    background:var(--accent); border:0; border-radius:8px; cursor:pointer; }
+  #err { min-height:1.4em; margin-top:10px; color:#ff8a8a; font-size:.9rem; }
+
+  /* Player */
+  #stage { position:fixed; inset:0; display:none; background:#000; }
+  #stage.on { display:block; }
+  #stage iframe { position:absolute; inset:0; width:100%; height:100%; border:0; pointer-events:none; }
+  /* Shield swallows every mouse event once playing */
+  #shield { position:absolute; inset:0; z-index:5; cursor:none; }
+  body.playing, body.playing * { cursor:none !important; }
+</style>
+</head>
+<body>
+
+<div id="prompt">
+  <div class="box">
+    <h1>Paste a YouTube link</h1>
+    <p>The video will play muted, on loop, filling the window. Once it starts, mouse movement and clicks are ignored.</p>
+    <div id="row">
+      <input id="link" type="text" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" spellcheck="false" autofocus>
+      <button id="go" type="button">Play</button>
+    </div>
+    <div id="err" role="alert"></div>
+  </div>
+</div>
+
+<div id="stage">
+  <div id="player"></div>
+  <div id="shield"></div>
+</div>
+
+<script>
+  var promptEl = document.getElementById('prompt');
+  var stage = document.getElementById('stage');
+  var shield = document.getElementById('shield');
+  var input = document.getElementById('link');
+  var err = document.getElementById('err');
+  var player = null;
+  var pendingId = null;
+  var apiReady = false;
+
+  function parseId(text) {
+    text = (text || '').trim();
+    if (/^[\w-]{11}$/.test(text)) return text;
+    try {
+      var u = new URL(text.indexOf('http') === 0 ? text : 'https://' + text);
+      var h = u.hostname.replace(/^www\.|^m\./, '');
+      var id = null;
+      if (h === 'youtu.be') id = u.pathname.slice(1).split('/')[0];
+      else if (h.indexOf('youtube.com') !== -1 || h.indexOf('youtube-nocookie.com') !== -1) {
+        if (u.pathname === '/watch') id = u.searchParams.get('v');
+        else {
+          var m = u.pathname.match(/^\/(embed|shorts|live|v)\/([\w-]{11})/);
+          if (m) id = m[2];
+        }
+      }
+      return id && /^[\w-]{11}$/.test(id) ? id : null;
+    } catch (e) { return null; }
+  }
+
+  // Load the YouTube IFrame API
+  var tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+  window.onYouTubeIframeAPIReady = function () {
+    apiReady = true;
+    if (pendingId) start(pendingId);
+  };
+
+  function maxQuality() {
+    try { player.setPlaybackQuality('highres'); } catch (e) {}
+  }
+
+  function lock() {
+    document.body.classList.add('playing');
+  }
+  function unlock() {
+    document.body.classList.remove('playing');
+  }
+
+  function start(id) {
+    pendingId = id;
+    if (!apiReady) return;
+    promptEl.style.display = 'none';
+    stage.classList.add('on');
+    if (player) { player.destroy(); player = null; stage.insertBefore(Object.assign(document.createElement('div'), {id:'player'}), shield); }
+    player = new YT.Player('player', {
+      width: '100%', height: '100%', videoId: id,
+      host: 'https://www.youtube.com',
+      playerVars: {
+        autoplay: 1, mute: 1, controls: 0, loop: 1, playlist: id, rel: 0,
+        modestbranding: 1, playsinline: 1, iv_load_policy: 3, disablekb: 1,
+        fs: 0, vq: 'highres', origin: location.origin
+      },
+      events: {
+        onReady: function (e) { e.target.mute(); maxQuality(); e.target.playVideo(); },
+        onStateChange: function (e) {
+          if (e.data === YT.PlayerState.PLAYING) { maxQuality(); lock(); }
+          if (e.data === YT.PlayerState.ENDED) { e.target.seekTo(0); e.target.playVideo(); }
+        },
+        onError: function () {
+          unlock();
+          stage.classList.remove('on');
+          promptEl.style.display = 'flex';
+          err.textContent = 'This video could not be played. It may block embedding. Try another link.';
+        }
+      }
+    });
+  }
+
+  function submit() {
+    var id = parseId(input.value);
+    if (!id) { err.textContent = 'That doesn\u2019t look like a YouTube link. Paste the full video URL.'; return; }
+    err.textContent = '';
+    start(id);
+  }
+
+  document.getElementById('go').addEventListener('click', submit);
+  input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+
+  // Ignore all mouse input once the video is playing
+  ['click','dblclick','mousedown','mouseup','mousemove','mouseover','mouseenter',
+   'wheel','contextmenu','auxclick','pointerdown','pointerup','pointermove','touchstart','touchmove']
+    .forEach(function (type) {
+      shield.addEventListener(type, function (e) { e.preventDefault(); e.stopPropagation(); }, { passive:false });
+    });
+  document.addEventListener('contextmenu', function (e) {
+    if (document.body.classList.contains('playing')) e.preventDefault();
+  });
+
+  // Optional: skip the prompt with ?v=LINK_OR_ID
+  var q = new URLSearchParams(location.search).get('v');
+  if (q && parseId(q)) { pendingId = parseId(q); }
+</script>
+</body>
+</html>
